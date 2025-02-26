@@ -1,46 +1,41 @@
-use actix_web::{get, web, App, HttpResponse, HttpServer};
-use mysql::{prelude::Queryable, Pool, OptsBuilder};
-use std::env;
+mod config;
+mod db;
+mod handlers;
+mod models;
+mod utils;
+mod logging;
 
-#[get("/{short_name}")]
-async fn to_short_url(short_name: web::Path<String>) -> HttpResponse {
-    let opts = OptsBuilder::new()
-    .ip_or_hostname(Some(env::var("DB_HOST").expect("DB_HOST must be set")))
-    .user(Some(env::var("DB_USERNAME").expect("DB_USERNAME must be set")))
-    .pass(Some(env::var("DB_PASSWORD").expect("DB_PASSWORD must be set")))
-    .db_name(Some(env::var("DB_DATABASE").expect("DB_DATABASE must be set")))
-    .tcp_port(
-        env::var("DB_PORT")
-            .expect("DB_PORT must be set")
-            .parse::<u16>() // 将字符串解析为 u16
-            .expect("Failed to parse DB_PORT as a number"), // 如果解析失败，抛出错误
-    );
-    let pool = Pool::new(opts).unwrap();
-    let mut conn = pool.get_conn().unwrap();
-    // 查询数据库
-    let query = format!("SELECT original_url FROM urls WHERE short_name = '{}'", short_name);
-    let result: Option<String> = conn.query_first(query).unwrap();
-
-    match result {
-        Some(original_url) => {
-            HttpResponse::Found().header("Location", original_url).finish()
-        },
-        None => {
-            // 如果未找到，返回 404 Not Found
-            HttpResponse::NotFound().body("Short URL not found")
-        }
-    }
-}
+use actix_files as fs;
+use actix_web::{App, HttpServer, web};
+use crate::config::Config;
+use crate::db::init_pool;
+use crate::handlers::url_handler::{generate_url, to_short_url, get_urls};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // 从环境变量加载配置
     dotenv::dotenv().ok();
-    HttpServer::new(|| {
+
+    // 初始化配置
+    let config = Config::from_env();
+    let config = web::Data::new(config); // 这里是 Data<Config> 的新实例
+
+    // 初始化数据库连接池
+    init_pool().expect("Failed to initialize database pool");
+
+    println!("Server running at: {}:{}", config.server.host, config.server.port);
+
+    // 启动HTTP服务器
+    let bind_config = config.clone(); // 为 bind 操作创建一个新的引用
+    HttpServer::new(move || {
         App::new()
+            .app_data(config.clone()) // 使用 clone() 而不是直接使用 config
+            .service(generate_url)
             .service(to_short_url)
+            .service(get_urls)
+            .service(fs::Files::new("/", "static").index_file("index.html"))
     })
-    .bind("127.0.0.1:8080")?
+    .bind(format!("{0}:{1}", bind_config.server.host, bind_config.server.port))? // 修正格式
     .run()
     .await
 }
